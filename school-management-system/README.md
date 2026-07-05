@@ -53,8 +53,9 @@ This package contains the uploaded working application prepared as a GitHub/Verc
 3. On GitHub, use **Add file → Upload files**, then drag in the **contents** of that unzipped folder (select all the files and the `docs` folder together and drop them in) — do **not** drag the outer folder itself. `index.html` must land at the **root** of the repo, not inside a subfolder.
 4. Commit the files to the default branch (e.g. `main`).
 5. Open `config.js` and confirm your Supabase URL and anon key are correct.
-6. In Vercel, import the repository. Framework preset: **Other**. Build command and Output directory: leave empty. **Root Directory: leave blank** (do not point it at a subfolder).
-7. Deploy.
+6. In your Supabase project → SQL Editor, run `docs/bcrypt-migration.sql` once (after your main schema is already in place). This adds server-side password functions using `pgcrypto`/bcrypt — required for login, registration, and password changes to work with this version of the app.
+7. In Vercel, import the repository. Framework preset: **Other**. Build command and Output directory: leave empty. **Root Directory: leave blank** (do not point it at a subfolder).
+8. Deploy.
 
 ### How to verify before deploying
 Open the repo on GitHub in your browser. The very first thing you should see listed is `index.html` — if you have to click into a folder first to find it, the upload was nested incorrectly and Vercel will return a 404. Move the files up to the root and re-commit.

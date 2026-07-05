@@ -1372,17 +1372,13 @@ async function doLogin(){
   errEl.style.display='none';
   if(!u||!p){errEl.textContent='Please enter username and password.';errEl.style.display='block';return;}
   try{
-    const user=await dbGetOne('users','username',u);
-    if(!user){errEl.textContent='User not found.';errEl.style.display='block';return;}
-    // Try hashed password first, then fall back to plain (for migration)
-  const hashedP = await hashPassword(p);
-  const pwMatch = user.password === hashedP || user.password === p;
-  if(!pwMatch){errEl.textContent='Wrong password.';errEl.style.display='block';return;}
-  // Auto-upgrade plain text password to hashed on successful login
-  if(user.password === p && p.length < 64){
-    user.password = hashedP;
-    await dbPut('users', user);
-  }
+    // Password check happens server-side (bcrypt via pgcrypto) — the browser
+    // never sees or computes the password hash. A null result covers both
+    // "no such user" and "wrong password" so failed logins can't be used
+    // to discover which usernames exist.
+    const result=await sbReq('POST','rpc/verify_login',{p_username:u,p_password:p});
+    if(!result){errEl.textContent='Invalid username or password.';errEl.style.display='block';return;}
+    const user=toCamel(result);
     if(user.status==='pending'){errEl.textContent='Your account is awaiting admin approval.';errEl.style.display='block';return;}
     if(user.status==='rejected'||user.status==='deactivated'){errEl.textContent='Your account has been deactivated. Contact admin.';errEl.style.display='block';return;}
     // 2FA check
@@ -1405,15 +1401,20 @@ async function doRegister(){
   if(!name||!username||!password||!email){msgEl.textContent='All fields required.';msgEl.style.color='var(--red)';msgEl.style.display='block';return;}
   if(password.length<6){msgEl.textContent='Password must be at least 6 characters.';msgEl.style.color='var(--red)';msgEl.style.display='block';return;}
   try{
-    const existing=await dbGetAll('users');
-    if(existing.find(u=>u.username===username)){msgEl.textContent='Username already taken. Please choose another.';msgEl.style.color='var(--red)';msgEl.style.display='block';return;}
-    if(existing.find(u=>(u.email||'').toLowerCase()===email)){msgEl.textContent='An account with that email already exists.';msgEl.style.color='var(--red)';msgEl.style.display='block';return;}
-    const hashedPw=await hashPassword(password);
-    await dbAdd('users',{username,password:hashedPw,name,email,role:regRole,studentId:regRole==='parent'?studentId:null,status:'pending',createdAt:new Date().toISOString()});
+    await sbReq('POST','rpc/self_register_user',{
+      p_name:name,p_username:username,p_email:email,p_password:password,
+      p_role:regRole,p_student_id:regRole==='parent'?(studentId||null):null
+    });
     msgEl.style.color='var(--amber)';
     msgEl.textContent=regRole==='teacher'?'✅ Account created! Awaiting admin approval.':'✅ Account created! Awaiting admin approval before you can sign in.';
     msgEl.style.display='block';
-  }catch(e){msgEl.textContent='Registration failed. Please try again.';msgEl.style.color='var(--red)';msgEl.style.display='block';}
+  }catch(e){
+    const msg=String(e.message||'');
+    if(msg.includes('Username already taken')){msgEl.textContent='Username already taken. Please choose another.';}
+    else if(msg.includes('Email already registered')){msgEl.textContent='An account with that email already exists.';}
+    else{msgEl.textContent='Registration failed. Please try again.';}
+    msgEl.style.color='var(--red)';msgEl.style.display='block';
+  }
 }
 
 async function doLogout(){
@@ -1480,10 +1481,10 @@ async function applyNewPassword(){
   const errEl=document.getElementById('rst-pw-error');errEl.style.display='none';
   if(np.length<6){errEl.textContent='Password must be at least 6 characters.';errEl.style.display='block';return;}
   if(np!==cp){errEl.textContent='Passwords do not match.';errEl.style.display='block';return;}
-  const user=await dbGet('users',resetState.userId);
-  const hashedNew=await hashPassword(np);
-  user.password=hashedNew;await dbPut('users',user);
-  resetState={userId:null,code:null,expiresAt:null};showRstStep(4);
+  try{
+    await sbReq('POST','rpc/reset_user_password',{p_user_id:resetState.userId,p_new_password:np});
+    resetState={userId:null,code:null,expiresAt:null};showRstStep(4);
+  }catch(e){errEl.textContent='Could not reset password. Please try again.';errEl.style.display='block';}
 }
 
 // ═══════════════════════════════════════════
@@ -3418,18 +3419,18 @@ function openCreateUserModal(){
     `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="createUser()">Create</button>`
   );
 }
-async function hashPassword(pw){
-  const encoder=new TextEncoder();
-  const data=encoder.encode(pw);
-  const hashBuffer=await crypto.subtle.digest('SHA-256',data);
-  const hashArray=Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b=>b.toString(16).padStart(2,'0')).join('');
-}
+// Password hashing now happens exclusively server-side (bcrypt via pgcrypto RPC
+// functions — see docs/bcrypt-migration.sql). The browser never computes or
+// transmits a password hash; it sends the raw password over HTTPS only to
+// verify_login / self_register_user / admin_create_user / change_own_password /
+// reset_user_password, all of which run inside the database.
 async function createUser(){
   const name=document.getElementById('cu-name').value.trim(),username=document.getElementById('cu-username').value.trim(),email=document.getElementById('cu-email').value.trim(),password=document.getElementById('cu-pw').value,role=document.getElementById('cu-role').value;
   if(!name||!username||!password||!email)return alert('All fields required');
-  const hpw=await hashPassword(password);try{await dbAdd('users',{name,username,password:hpw,email,role,status:'active',createdAt:new Date().toISOString()});await audit('CREATE_USER',`${name} (${role})`);toast('User created','success');closeModal();pgUsers();}
-  catch(e){alert('Username already taken');}
+  try{
+    await sbReq('POST','rpc/admin_create_user',{p_name:name,p_username:username,p_email:email,p_password:password,p_role:role});
+    await audit('CREATE_USER',`${name} (${role})`);toast('User created','success');closeModal();pgUsers();
+  }catch(e){alert('Username already taken');}
 }
 
 // ═══════════════════════════════════════════
@@ -3834,11 +3835,13 @@ async function saveAccountInfo(){
 }
 async function changePassword(){
   const old=document.getElementById('pw-old').value,nw=document.getElementById('pw-new').value,conf=document.getElementById('pw-confirm').value;
-  const hashedOld=await hashPassword(old);
-  if(currentUser.password!==hashedOld&&currentUser.password!==old)return toast('Current password incorrect','error');
   if(nw!==conf)return toast('Passwords do not match','error');
   if(nw.length<6)return toast('Minimum 6 characters','error');
-  const hashedNew=await hashPassword(nw);currentUser.password=hashedNew;await dbPut('users',currentUser);toast('Password updated','success');
+  try{
+    const ok=await sbReq('POST','rpc/change_own_password',{p_user_id:currentUser.id,p_old_password:old,p_new_password:nw});
+    if(!ok)return toast('Current password incorrect','error');
+    toast('Password updated','success');
+  }catch(e){toast('Could not update password','error');}
 }
 async function loadDefaultClasses(){
   const defaults=ALL_LEVELS.map(l=>({name:l,level:l}));
